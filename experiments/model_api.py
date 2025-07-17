@@ -1160,6 +1160,7 @@ class CustomModelHandler:
         max_new_tokens=1024,
         do_sample=False,
         temperature=None,
+        top_p=None
     ):
         """
         Main batch inference API for efficient model evaluation.
@@ -1312,7 +1313,7 @@ class CustomModelHandler:
                     use_cache=True,
                     do_sample=do_sample,  # for deterministic generation
                     num_beams=1,
-                    top_p=None,
+                    top_p=top_p,
                     temperature=temperature,
                     pad_token_id=self.tokenizer.pad_token_id,
                     eos_token_id=[self.tokenizer.eos_token_id, 128009],
@@ -1327,7 +1328,7 @@ class CustomModelHandler:
                     use_cache=True,
                     do_sample=do_sample,  # for deterministic generation
                     num_beams=1,
-                    top_p=None,
+                    top_p=top_p,
                     temperature=temperature,
                     pad_token_id=self.tokenizer.pad_token_id,
                     eos_token_id=[self.tokenizer.eos_token_id, 128009],

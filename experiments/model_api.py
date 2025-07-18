@@ -1155,8 +1155,9 @@ class CustomModelHandler:
 
     def call_model_api_batch(
         self,
-        system_instructions: List[str],
-        user_instructions: List[str],
+        system_instructions: List[str] = None,
+        user_instructions: List[str] = None,
+        text_sequences_list: List[List] = None,
         max_new_tokens=1024,
         do_sample=False,
         temperature=None,
@@ -1188,11 +1189,10 @@ class CustomModelHandler:
             
         """
         # For debugging or logging, store each example's model input
-
         model_inputs_for_logging = []
 
         # If we have N items in the batch:
-        batch_size = len(system_instructions)
+        batch_size = len(text_sequences_list) if text_sequences_list is not None else len(system_instructions)
 
         # We'll collect each example's tokenized results in lists
         all_input_ids = []
@@ -1200,17 +1200,19 @@ class CustomModelHandler:
         all_attention_masks = []
         input_lengths = []
 
-        i = 0
-        for sys_inst, usr_inst in zip(system_instructions, user_instructions):
-            # Format the input (chat) according to your custom logic:
-            text_sequences = format_model_input(
-                self.tokenizer,
-                system_instruction=sys_inst,
-                user_instruction=usr_inst,
-                split_chat=self.split_chat,
-            )
+        for i in range(batch_size):
+            if text_sequences_list is None:
+                assert system_instructions is not None
+                assert user_instructions is not None
+                text_sequences = format_model_input(
+                    self.tokenizer,
+                    system_instruction=system_instructions[i],
+                    user_instruction=user_instructions[i],
+                    split_chat=self.split_chat,
+                )
+            else:
+                text_sequences = text_sequences_list[i]
             model_inputs_for_logging.append(text_sequences)
-
             input_ids, attention_mask, segment_ids = texts_to_prepared_ids(
                 text_sequences,
                 self.tokenizer,
@@ -1531,7 +1533,154 @@ def format_model_input(
 
     else:
         text_sequences = [(chat, "inst")]
+    print("Debug text sequences", text_sequences)
     return text_sequences  # [(Do me this, "inst"), (2+2, "data")]
+
+
+def parse_text_blocks(prompt, default_type="inst"):
+    """
+    Parse a string containing <<INST_BLOCK>> and <<DATA_BLOCK>> delimiters.
+    
+    Args:
+        prompt (str): The input string containing the delimiters
+        default_type (str): Type to assign to text before the first delimiter
+        
+    Returns:
+        List[Tuple[str, str]]: List of (text, type) tuples where type is "inst" or "data"
+    """
+    inst_block = "<<INST_BLOCK>>"
+    data_block = "<<DATA_BLOCK>>"
+    
+    result = []
+    current_pos = 0
+    current_type = default_type
+    
+    while current_pos < len(prompt):
+        # Find the next delimiter
+        inst_pos = prompt.find(inst_block, current_pos)
+        data_pos = prompt.find(data_block, current_pos)
+        
+        # Determine which delimiter comes first
+        next_delim_pos = len(prompt)  # default to end of string
+        next_type = None
+        
+        if inst_pos != -1 and data_pos != -1:
+            if inst_pos < data_pos:
+                next_delim_pos = inst_pos
+                next_type = "inst"
+            else:
+                next_delim_pos = data_pos
+                next_type = "data"
+        elif inst_pos != -1:
+            next_delim_pos = inst_pos
+            next_type = "inst"
+        elif data_pos != -1:
+            next_delim_pos = data_pos
+            next_type = "data"
+        
+        # Extract text before the next delimiter
+        text_content = prompt[current_pos:next_delim_pos].strip()
+        
+        # Add to result if there's actual content
+        if text_content:
+            result.append((text_content, current_type))
+        
+        # Move past the delimiter and update current type
+        if next_type:
+            current_pos = next_delim_pos + len(inst_block if next_type == "inst" else data_block)
+            current_type = next_type
+        else:
+            break
+    cur_typ = None 
+    new_result = []
+    for text, typ in result:
+        if typ != cur_typ:
+            new_result.append([text, typ])
+            cur_typ = typ
+        else:
+            new_result[-1][0] += " " + text
+    return new_result
+
+    
+def format_chat_messages(
+    tokenizer,
+    messages: list[dict[str, Union[str, list[tuple]]]],
+    # system_instruction: str,
+    # user_text_sequence: str,
+    # assistant_message: str = None,
+    inst_block = "<<INST_BLOCK>>",
+    data_block = "<<DATA_BLOCK>>"
+) -> List[tuple[str, str]]:
+    """
+    Format model input according to embedding type requirements.
+    
+    This function handles the critical task of formatting prompts for different
+    embedding strategies. For ASIDE/ISE models, it splits the chat at the 
+    "Input:" separator to enable proper instruction-data routing.
+    
+    Args:
+        tokenizer: The model's tokenizer (with chat template)
+        messages: a list of messages with keys "content" and "role". 
+                "content" is a list of tuples ("inst"/"data", text)
+
+        split_chat (bool): Whether to split for instruction-data separation
+        
+    Returns:
+        list: List of (text, role) tuples for tokenization
+            - For vanilla models: [("full_chat", "inst")]
+            - For ASIDE/ISE models: [("instruction_part", "inst"), ("data_part", "data")]
+            
+    Chat Template Processing:
+        1. Apply tokenizer's chat template if available
+        2. Otherwise use simple concatenation format  
+        3. Split at "Input:" separator if split_chat=True
+        4. Assign appropriate routing roles ("inst" vs "data")
+        
+    Note:
+        The split_chat parameter is automatically set based on embedding type
+        in CustomModelHandler initialization. This ensures proper routing for
+        instruction-data separation methods.
+    """
+    
+    formatted_messages = []
+    for msg in messages:
+        if msg["role"] in ("system", "assistant"):
+            formatted_messages.append(msg)
+        elif msg["role"] == "user":
+            if isinstance(msg["content"], list):
+                user_message = ""
+                for typ, text in msg["content"]:
+                    if typ == "inst":
+                        user_message += f"{inst_block}{text} "
+                    else:
+                        user_message += f"{data_block}{text} "        
+            elif isinstance(msg["content"], str):
+                user_message = f"{inst_block}{msg['content']} "
+            user_message += data_block
+            formatted_messages.append({
+                "role": "user",
+                "content": user_message
+            })
+        else:
+            raise ValueError("msg[role] shall be one of (assistant, user, system)")
+
+    # system_instruction = format_prompt(system_instruction, template, "system")
+    # user_message = format_prompt(user_message, template, "user")
+    # assistant_message = format_prompt(assistant_message, template, "output")
+    assert tokenizer.chat_template is not None
+    add_generation_prompt = True
+    for msg in formatted_messages:
+        if msg["role"] == "assistant":
+            add_generation_prompt = False
+    print("orig messages", messages)
+    print("formatted", formatted_messages)
+    prompt = tokenizer.apply_chat_template(
+            formatted_messages, tokenize=False, add_generation_prompt=add_generation_prompt)
+    text_sequences = parse_text_blocks(prompt)
+
+    return text_sequences  # [(Do me this, "inst"), (2+2, "data")]
+
+
 
 
 def load_config(config_path: str = "./config.json") -> Dict:
